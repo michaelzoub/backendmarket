@@ -16,5 +16,7 @@ data class Users(
     @Column(name = "steam_id")
     val steamId: String,
     @Column
-    val balance: Double
+    val balance: Double,
+    @Column
+    val transactionIds: List<String>,
 )
