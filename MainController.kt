@@ -9,6 +9,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication
 import org.springframework.boot.runApplication
 import org.springframework.context.annotation.Configuration
 import org.springframework.context.annotation.Bean
+import org.springframework.context.annotation.Lazy
 import org.springframework.http.ResponseEntity
 import org.springframework.http.HttpStatus
 import org.springframework.http.MediaType
@@ -21,6 +22,7 @@ import org.springframework.web.bind.annotation.RequestParam
 import org.springframework.web.bind.annotation.RestController
 import org.springframework.web.bind.annotation.CookieValue
 import org.springframework.web.bind.annotation.CrossOrigin
+import org.springframework.transaction.annotation.Transactional
 import org.springframework.web.util.CookieGenerator
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.web.reactive.function.client.WebClient
@@ -56,6 +58,14 @@ import kotlinx.coroutines.*
 
 @SpringBootApplication
 class DeadlockLogic
+
+@Configuration
+class AppConfig {
+	@Bean
+	fun transactionDataCipher(): TransactionDataCipher {
+		return TransactionDataCipher()
+	}
+}
 
 //CORS config
 @Configuration
@@ -105,7 +115,7 @@ data class neededProfileInfo (
 )
 
 @Service
-class SteamService(private val userRepository: UserRepository, private val webClient: WebClient) {
+class SteamService(private val userRepository: UserRepository, private val webClient: WebClient, private val transactionDataCipher: TransactionDataCipher) {
 
 fun findSteamId(receivedSteamId: String): Double {
 	//UserRepository extends JpaRepository<Users, Long>, Users is a data class that matches MySql table of steamusers, i then want to create a service class annotated with @Service to use received steamId to check if it already exists in the table
@@ -116,6 +126,13 @@ fun findSteamId(receivedSteamId: String): Double {
 	} else {
 		return -10.1
 	}
+}
+
+fun createTransactionId(time: Long, items: List<String>, correspondingPrices: List<String>, steamId: String): Boolean {
+	val encryptedTransaction = transactionDataCipher.encrypt(time, items, correspondingPrices)
+	println("tx id encrypted: ${encryptedTransaction.length}")
+	userRepository.createTransaction(encryptedTransaction, steamId)
+	return true
 }
 
 fun substractCartFromUserBalanceDB(balance: Double, cartval: Double, steamId: String): Boolean {
@@ -145,13 +162,13 @@ suspend fun fetchUserInfoFromSteamAPI(steamId: String): Mono<String> {
 @RequestMapping("/api")
 class MainController(private val service: SteamService, private val repo: UserRepository) {
 	@PostMapping("/test")
-	fun test(@RequestBody body: receivedDataTradeUserToBot): String {
+	fun test(@RequestBody body: receivedClientData): String {
 		println("${body}")
 		return "Received data for ${body.loggedInSteamId}"
 	}
 
 	@PostMapping("/trade")
-	fun trade(@RequestBody body: receivedDataTradeUserToBot): Boolean {
+	fun trade(@RequestBody body: receivedClientData): Boolean {
 		println("Trade hit, received info: ${body}")
 		val result = service.findSteamId(body.loggedInSteamId)
 		if (result !== -10.1) {
@@ -162,6 +179,7 @@ class MainController(private val service: SteamService, private val repo: UserRe
 				ResponseEntity.status(HttpStatus.BAD_REQUEST).body("Error, missing funds.")
 				return false
 			} else {
+				service.createTransactionId(body.time, body.itemsInCart, body.correspondingPrices, body.loggedInSteamId)
 				println("User has enough balance ${body.cartValue}")
 				service.substractCartFromUserBalanceDB(userBalance, body.cartValue, body.loggedInSteamId)
 				println("Substraction for user: ${userBalance - body.cartValue}")
@@ -203,7 +221,7 @@ class MainController(private val service: SteamService, private val repo: UserRe
 			return ResponseEntity.ok(test)
 		} else {
 			//we save the steam ID to the repo with a balance of 0:
-			val user = Users(steamId = id, balance = 0.0, listOf())
+			val user = Users(steamId = id.toString(), balance = 0.0)
 			repo.save(user)
 			//fetch steam api
 			val test = neededProfileInfo(name = playerName, profilePicture = playerProfilePic)
@@ -211,9 +229,23 @@ class MainController(private val service: SteamService, private val repo: UserRe
 		}
 	}
 
-	@GetMapping("/setcookies")
-	fun setCookies() {
+	@PostMapping("/fetchtransactions")
+	fun sendTransactions(@RequestBody steamId: String): List<Any> {
+		val gottenItems: List<Any> = repo.fetchAllTransactions(steamId) 
+		return gottenItems
+	}
 
+	@PostMapping("fetchtransactioninfo")
+	fun sendTransactionInfo(	@CookieValue(value = "__balanceCookie", defaultValue = "null") balanceCookie: String,
+								@CookieValue(value = "__steamId", defaultValue = "null") steamId: String): ResponseEntity<Any> {
+		val fetched = repo.fetchBalance(steamId)
+		print("fetched transaction info on useEffect: $fetched")
+		return ResponseEntity.ok(fetched)
+	}
+
+	@GetMapping("updatecookies")
+	fun updateCookies(): String {
+		return ""
 	}
 
 	@GetMapping("/usercookies")
@@ -251,10 +283,6 @@ class MainController(private val service: SteamService, private val repo: UserRe
 		return ResponseEntity(mapOf("clientSecret" to createClientSecret), HttpStatus.OK)
 	}
 
-	@PostMapping("/confirm-payment-intent")
-	fun confirmPaymentIntent(@RequestBody body: FormData) {
-
-	}
 }
 
 

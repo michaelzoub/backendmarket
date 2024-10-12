@@ -1,5 +1,5 @@
 package com.example.blog
-data class receivedDataTradeUserToBot (
+data class receivedClientData (
 	val loggedInSteamId: String,
 	val cartValue: Double,
 	val time: Long,

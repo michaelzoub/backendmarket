@@ -10,8 +10,8 @@ import com.stripe.param.PaymentIntentConfirmParams
 import org.springframework.context.annotation.Configuration
 import org.springframework.beans.factory.annotation.Value
 
-@Value("\${stripe.api-key}")
-private lateinit var stripeapi: String
+//@Value("\${stripe.api-key}")
+private val stripeapi: String = "sk_test_51Q2bcKGPi4c603NdTiwc7xb1RKdEmOXmCfidJJFScTnFQ87GLdZ1Cv6g5JcnxgQ8kscPOwKhng3QFHrMQvMWDfBV00GpyS6dwB"
 
 @Configuration
 class StripeConfig {
@@ -38,7 +38,7 @@ fun createPaymentIntent(amount: Double, currency: String): PaymentIntent {
 fun confirmPaymentIntent(paymentMethod: String, paymentIntentId: String): PaymentIntent {
     var resource = PaymentIntent.retrieve(paymentIntentId)
     var params = PaymentIntentConfirmParams.builder()
-    .setPaymentMethod("pm_card_visa")
+    .setPaymentMethod(paymentMethod)
     .setReturnUrl("localhost:3000/payment/success")
     .build()
     return resource.confirm(params)
