@@ -22,12 +22,18 @@ import org.springframework.web.bind.annotation.RequestParam
 import org.springframework.web.bind.annotation.RestController
 import org.springframework.web.bind.annotation.CookieValue
 import org.springframework.web.bind.annotation.CrossOrigin
+import org.springframework.web.socket.config.annotation.EnableWebSocket
+import org.springframework.web.socket.config.annotation.WebSocketConfigurer
+import org.springframework.web.socket.config.annotation.WebSocketHandlerRegistry
 import org.springframework.transaction.annotation.Transactional
 import org.springframework.web.util.CookieGenerator
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.web.reactive.function.client.WebClient
 import org.springframework.data.jpa.repository.JpaRepository
 import org.springframework.stereotype.Repository
+import org.springframework.dao.DataIntegrityViolationException
+
+import com.stripe.model.PaymentIntent
 
 import reactor.core.publisher.Mono
 
@@ -53,6 +59,7 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer
 
 import kotlinx.coroutines.reactor.awaitSingle
 import kotlinx.coroutines.*
+import kotlinx.coroutines.runBlocking
 
 //i'd have to add checks wether user has balance, etc
 
@@ -114,6 +121,11 @@ data class neededProfileInfo (
 	val profilePicture: String
 )
 
+data class receivedInfoForAccountCreditStripe (
+	val amount: Number,
+	val steamId: String
+)
+
 @Service
 class SteamService(private val userRepository: UserRepository, private val webClient: WebClient, private val transactionDataCipher: TransactionDataCipher) {
 
@@ -145,6 +157,46 @@ fun substractCartFromUserBalanceDB(balance: Double, cartval: Double, steamId: St
 	return true
 }
 
+fun updateCookies(playerName: String, playerProfilePic:String, balance: Double, steamId: String, totalTransactions: List<Any>, responseServlet: HttpServletResponse) {
+	var cookiesMap: HashMap<String, String>
+	if (playerName.isNullOrEmpty() && playerProfilePic.isNullOrEmpty()) {
+		println("is null or empty hit")
+		cookiesMap = hashMapOf(
+			"__balanceCookie" to URLEncoder.encode(balance.toString(), StandardCharsets.UTF_8),
+			"__totalTransactions" to URLEncoder.encode(totalTransactions.size.toString(), StandardCharsets.UTF_8),
+		)
+	} else {
+		cookiesMap = hashMapOf(
+			"__playerName" to URLEncoder.encode(playerName, StandardCharsets.UTF_8),
+			"__profilePic" to URLEncoder.encode(playerProfilePic, StandardCharsets.UTF_8),
+			"__balanceCookie" to URLEncoder.encode(balance.toString(), StandardCharsets.UTF_8),
+			"__steamId" to URLEncoder.encode(steamId, StandardCharsets.UTF_8),
+			"__totalTransactions" to URLEncoder.encode(totalTransactions.size.toString(), StandardCharsets.UTF_8),
+		)
+	}
+	println("cookies values: ${playerName}, ${playerProfilePic}")
+	for ((name, cookieValue) in cookiesMap) {
+		val cookie = Cookie(name, cookieValue)
+		cookie.path = "/" // Set the path where the cookie is valid
+		cookie.maxAge = 7 * 24 * 60 * 60 // 7 days
+		cookie.domain = "localhost"
+		cookie.isHttpOnly = true
+		cookie.secure = false //CHANGE TO TRUE IN PROD
+		cookie.setAttribute("SameSite", "Strict")
+		//responseServlet.addCookie(cookie) // Add cookie to the response
+		println("${name} to ${cookieValue}")	
+		responseServlet.addCookie(cookie)	
+	}
+}
+
+fun createPaymentIntentService(amount: Double, currency: String): PaymentIntent {
+	return createPaymentIntent(amount, currency)
+}
+
+fun decipherTransaction(input: String): Any {
+	return transactionDataCipher.decrypt(input)
+}
+
 @Value("\${steam.api-key}")
 private lateinit var apiKey: String
 
@@ -162,34 +214,47 @@ suspend fun fetchUserInfoFromSteamAPI(steamId: String): Mono<String> {
 @RequestMapping("/api")
 class MainController(private val service: SteamService, private val repo: UserRepository) {
 	@PostMapping("/test")
-	fun test(@RequestBody body: receivedClientData): String {
+	suspend fun test(@RequestBody body: receivedClientData): String {
 		println("${body}")
 		return "Received data for ${body.loggedInSteamId}"
 	}
 
 	@PostMapping("/trade")
-	fun trade(@RequestBody body: receivedClientData): Boolean {
+	@Transactional
+	suspend fun trade(@RequestBody body: receivedClientData, responseServlet: HttpServletResponse): ResponseEntity<Any> {
 		println("Trade hit, received info: ${body}")
 		val result = service.findSteamId(body.loggedInSteamId)
-		if (result !== -10.1) {
+		if (result != -10.1) {
 			println("All good, result: ${result}")
 			var userBalance: Double = result
 			if (body.cartValue > userBalance) {
 				println("cartValue is bigger than $userBalance")
 				ResponseEntity.status(HttpStatus.BAD_REQUEST).body("Error, missing funds.")
-				return false
+				return ResponseEntity.ok("Error!")
 			} else {
-				service.createTransactionId(body.time, body.itemsInCart, body.correspondingPrices, body.loggedInSteamId)
-				println("User has enough balance ${body.cartValue}")
-				service.substractCartFromUserBalanceDB(userBalance, body.cartValue, body.loggedInSteamId)
-				println("Substraction for user: ${userBalance - body.cartValue}")
-				return true
+				val tx = service.createTransactionId(body.time, body.itemsInCart, body.correspondingPrices, body.loggedInSteamId)
+				return try {
+					println("User has enough balance ${body.cartValue}")
+					service.substractCartFromUserBalanceDB(userBalance, body.cartValue, body.loggedInSteamId)
+					val newBalance = userBalance - body.cartValue
+					println("Substraction for user: ${newBalance}")
+					val allTransactions = repo.fetchAllTransactions(body.loggedInSteamId)
+					//update cookie on completion
+					service.updateCookies("", "", newBalance, body.loggedInSteamId, allTransactions, responseServlet)
+					return ResponseEntity.ok(newBalance)
+				} catch (error: DataIntegrityViolationException) {
+					return ResponseEntity.ok("Duplicate transaction ID.")
+				} catch (error: Exception) {
+					println("Exception error for trade.")
+					return ResponseEntity.ok("Error")
+				}
 			}
 		} else {
 			println("error")
-			return false
+			return ResponseEntity.ok("Error!")
 		}
 	}
+
 
 	@PostMapping("/here")
 	suspend fun steamRedirect(@RequestBody id: String, responseServlet: HttpServletResponse): ResponseEntity<Any> {
@@ -201,22 +266,8 @@ class MainController(private val service: SteamService, private val repo: UserRe
 		val playerName = playerInfo.personaname
 		val playerProfilePic = playerInfo.avatarmedium
 		if (result !== -10.1) {
-			val cookiesMap = hashMapOf(
-                "__playerName" to URLEncoder.encode(playerName, StandardCharsets.UTF_8),
-                "__profilePic" to URLEncoder.encode(playerProfilePic, StandardCharsets.UTF_8),
-                "__balanceCookie" to URLEncoder.encode(result.toString(), StandardCharsets.UTF_8),
-				"__steamId" to URLEncoder.encode(steamId, StandardCharsets.UTF_8)
-            )
-			println("cookies values: ${playerName}, ${playerProfilePic}")
-			for ((name, cookieValue) in cookiesMap) {
-				val cookie = Cookie(name, cookieValue)
-				cookie.path = "/" // Set the path where the cookie is valid
-				cookie.maxAge = 7 * 24 * 60 * 60 // 7 days
-				cookie.domain = "localhost"
-				//responseServlet.addCookie(cookie) // Add cookie to the response
-				println("${name} to ${cookieValue}")	
-				responseServlet.addCookie(cookie)	
-			}
+			val transactions = sendTransactions(steamId)
+			service.updateCookies(playerName, playerProfilePic, result, steamId, transactions, responseServlet)
 			val test = neededProfileInfo(name = playerName, profilePicture = playerProfilePic)
 			return ResponseEntity.ok(test)
 		} else {
@@ -230,38 +281,45 @@ class MainController(private val service: SteamService, private val repo: UserRe
 	}
 
 	@PostMapping("/fetchtransactions")
-	fun sendTransactions(@RequestBody steamId: String): List<Any> {
+	suspend fun sendTransactions(@RequestBody steamId: String): List<Any> {
 		val gottenItems: List<Any> = repo.fetchAllTransactions(steamId) 
 		return gottenItems
 	}
 
-	@PostMapping("fetchtransactioninfo")
-	fun sendTransactionInfo(	@CookieValue(value = "__balanceCookie", defaultValue = "null") balanceCookie: String,
-								@CookieValue(value = "__steamId", defaultValue = "null") steamId: String): ResponseEntity<Any> {
-		val fetched = repo.fetchBalance(steamId)
-		print("fetched transaction info on useEffect: $fetched")
-		return ResponseEntity.ok(fetched)
+	@PostMapping("singletransactioninfo")
+	suspend fun sendSingleTransactionInfo(@RequestBody transactionid: String): Any {
+		val info = service.decipherTransaction(transactionid)
+		return info
 	}
 
-	@GetMapping("updatecookies")
-	fun updateCookies(): String {
-		return ""
+	@GetMapping("updatebalance")
+	suspend fun sendUpdatedBalanceOnClient(	@CookieValue(value = "__balanceCookie", defaultValue = "null") balanceCookie: String,
+								@CookieValue(value = "__steamId", defaultValue = "null") steamId: String): String {
+		if (steamId != "null") {
+			val fetched = repo.fetchBalance(steamId)
+			println("fetched transaction info on useEffect: $fetched")
+			return fetched.toString()
+		} else {
+			println("is null")
+			return balanceCookie.toString()
+		}
 	}
 
 	@GetMapping("/usercookies")
-	fun getCookies( @CookieValue(value = "__playerName", defaultValue = "null") nameCookie: String,
+	suspend fun getCookies( @CookieValue(value = "__playerName", defaultValue = "") nameCookie: String,
 					@CookieValue(value = "__profilePic", defaultValue = "null") profilepicCookie: String, 
 					@CookieValue(value = "__balanceCookie", defaultValue = "null") balanceCookie: String,
-					@CookieValue(value = "__steamId", defaultValue = "null") steamId: String): List<String> {
-		val cookiesList = listOf(nameCookie, profilepicCookie, balanceCookie, steamId)
+					@CookieValue(value = "__steamId", defaultValue = "null") steamId: String,
+					@CookieValue(value = "__totalTransactions", defaultValue = "null") totalTransactions: String): List<String> {
+		val cookiesList = listOf(nameCookie, profilepicCookie, balanceCookie, steamId, totalTransactions)
 		println("cookie list: ${cookiesList}")
 		return cookiesList
 	}
 
 	@PostMapping("/clearcookies")
-	fun clearCookies(responseServlet: HttpServletResponse): ResponseEntity<Any> {
+	suspend fun clearCookies(responseServlet: HttpServletResponse): ResponseEntity<Any> {
 		val cookieNameList = listOf(
-			"__playerName", "__profilePic", "__balanceCookie"
+			"__playerName", "__profilePic", "__balanceCookie", "__totalTransactions" 
 		)
 		for (name in cookieNameList) {
 			val cookie = Cookie(name, "")
@@ -275,12 +333,23 @@ class MainController(private val service: SteamService, private val repo: UserRe
 	}
 
 	@PostMapping("/create-payment-intent")
-	fun createRestPaymentIntent(@RequestBody body: FormData): ResponseEntity<Map<String, String>> {
-		var createdPaymentIntent = createPaymentIntent(body.payment.toDouble(), body.currency)
+	suspend fun createRestPaymentIntent(@RequestBody body: FormData): ResponseEntity<Map<String, String>> {
+		var createdPaymentIntent = service.createPaymentIntentService(body.payment.toDouble(), body.currency)
 		println("createdPaymentIntent var id: ${createdPaymentIntent.id}")
 		var createClientSecret = createdPaymentIntent.getClientSecret()
 		println("client secret: ${createClientSecret}")
 		return ResponseEntity(mapOf("clientSecret" to createClientSecret), HttpStatus.OK)
+	}
+
+	@PostMapping("add-balance-from-stripe-payment")
+	suspend fun addBalanceToUser(@RequestBody body: receivedInfoForAccountCreditStripe): ResponseEntity<Any> {
+		println("$body")
+		val updatedRows = repo.creditUserAccount(body.steamId, body.amount.toDouble())
+		if (updatedRows < 1) {
+			return ResponseEntity.ok("Error")
+		} else {
+			return ResponseEntity.ok(body.amount)
+		}
 	}
 
 }

@@ -29,4 +29,14 @@ interface UserRepository: CrudRepository<Users, String> {
 
     @Query("SELECT balance FROM testtable WHERE steam_id = :steamId", nativeQuery = true)
     fun fetchBalance(@Param("steamId") steamId: String): Double
+
+    @Modifying
+    @Transactional
+    @Query("UPDATE testtable SET balance = balance + :amount WHERE steam_id = :steamId", nativeQuery = true)
+    fun creditUserAccount(@Param("steamId") steamId: String, @Param("amount") amount: Number): Int
+
+    //add function that finds item ids being purchased 
+    //@Transactional
+    //@Query("SELECT skinId FROM skinstable WHERE skinId IN :itemsBeingPurchasedId", nativeQuery = true)
+    //fun returnSkins(@Param("itemsBeingPurchasedId") itemsBeingPurchasedId: List<String>): List<String>
 }

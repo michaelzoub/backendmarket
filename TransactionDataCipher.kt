@@ -26,12 +26,10 @@ class TransactionDataCipher {
     val correspondingPrices: List<String>
     )
 
-    //@Value("\${rsa.private}")
     private val aesKey: String = "FRVNq+3ySQ0E9fYQGUxMvZ406Ns7usuw"
 
     private lateinit var mainKey: SecretKey;
-
-    //turn string into proper object for usage
+    
     init {
        mainKey = convertStringToSecretKey(aesKey)
     }
@@ -62,12 +60,14 @@ class TransactionDataCipher {
         return byteArrayToBase64(finalCipher)
     }
     
-    fun decrypt(txid: ByteArray): ItemObject {
+    fun decrypt(txid: String): ItemObject {
+        val byteArrayTxid: ByteArray = Base64ToByteArray(txid)
         val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
         val iv = ByteArray(16)
         cipher.init(Cipher.DECRYPT_MODE, mainKey, IvParameterSpec(iv))
-        val stringDecipher:String = String(cipher.doFinal(txid))
-        val split = stringDecipher.split("@", "+") // get 3 parts 
+        val decipher = cipher.doFinal(byteArrayTxid)
+        val toString = String(decipher)
+        val split = toString.split("@", "+") // get 3 parts 
         return ItemObject (
             time = split[0].toLong(),
             items = split[1].split(","),
