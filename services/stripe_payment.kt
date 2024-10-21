@@ -10,8 +10,8 @@ import com.stripe.param.PaymentIntentConfirmParams
 import org.springframework.context.annotation.Configuration
 import org.springframework.beans.factory.annotation.Value
 
-@Value("\${stripe.api-key}")
-private lateinit val stripeapi: String
+//@Value("\${stripe.api-key}")
+private var stripeapi: String = "sk_test_51Q2bcKGPi4c603NdTiwc7xb1RKdEmOXmCfidJJFScTnFQ87GLdZ1Cv6g5JcnxgQ8kscPOwKhng3QFHrMQvMWDfBV00GpyS6dwB"
 
 @Configuration
 class StripeConfig {

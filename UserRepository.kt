@@ -35,8 +35,22 @@ interface UserRepository: CrudRepository<Users, String> {
     @Query("UPDATE testtable SET balance = balance + :amount WHERE steam_id = :steamId", nativeQuery = true)
     fun creditUserAccount(@Param("steamId") steamId: String, @Param("amount") amount: Number): Int
 
+    @Modifying
+    @Transactional
+    @Query("UPDATE testtable SET trade_link = :tradeLink WHERE steam_id = :steamId", nativeQuery = true)
+    fun addTradeLink(@Param("steamId") steamId: String, @Param("tradeLink") tradeLink: String): Int
+
+    @Query("SELECT trade_link FROM testtable WHERE steam_id = :steamId", nativeQuery = true)
+    fun fetchTradeLink(@Param("steamId") steamId: String): String?
+
     //add function that finds item ids being purchased 
     //@Transactional
     //@Query("SELECT skinId FROM skinstable WHERE skinId IN :itemsBeingPurchasedId", nativeQuery = true)
     //fun returnSkins(@Param("itemsBeingPurchasedId") itemsBeingPurchasedId: List<String>): List<String>
+
+    //function that removes items from database
+    @Modifying
+    @Transactional
+    @Query("DELETE FROM skinsdata i WHERE i.id IN :itemList", nativeQuery = true)
+    fun removeItems(@Param("itemList") itemList: List<Any>): Int
 }

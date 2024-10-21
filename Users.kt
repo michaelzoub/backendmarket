@@ -11,10 +11,12 @@ import jakarta.persistence.Table;
 
 @Entity //makes table out of this class
 @Table(name = "testtable")
-data class Users(
+data class Users (
     @Id
     @Column(name = "steam_id")
     val steamId: String,
     @Column
     val balance: Double,
+    @Column(name = "trade_link")
+    val tradeLink: String
 )

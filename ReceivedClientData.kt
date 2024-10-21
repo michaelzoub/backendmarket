@@ -4,5 +4,6 @@ data class receivedClientData (
 	val cartValue: Double,
 	val time: Long,
 	val itemsInCart: List<String>, 
-    val correspondingPrices: List<String>
+    val correspondingPrices: List<String>,
+	val
 )
