@@ -3,6 +3,8 @@ package com.example.blog
 import com.example.blog.services.createPaymentIntent
 
 import com.google.gson.Gson
+import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import com.fasterxml.jackson.module.kotlin.readValue
 
 import org.springframework.stereotype.Service;
 import org.springframework.boot.autoconfigure.SpringBootApplication
@@ -32,10 +34,13 @@ import org.springframework.web.reactive.function.client.WebClient
 import org.springframework.data.jpa.repository.JpaRepository
 import org.springframework.stereotype.Repository
 import org.springframework.dao.DataIntegrityViolationException
+import org.springframework.core.io.buffer.DataBuffer
+import org.springframework.core.io.buffer.DataBufferUtils
 
 import com.stripe.model.PaymentIntent
 
 import reactor.core.publisher.Mono
+import reactor.core.publisher.Flux
 
 import javax.persistence.Entity
 import javax.persistence.Id
@@ -90,10 +95,11 @@ class WebConfig : WebMvcConfigurer {
 
 @Configuration
 class WebClientConfig {
-
     @Bean
     fun webClient(): WebClient {
-        return WebClient.builder().build() // Simple WebClient instance
+        return WebClient.builder()
+		.codecs { configurer -> configurer.defaultCodecs().maxInMemorySize(10 * 1024 * 1024) }
+		.build() // Simple WebClient instance
     }
 }
 
@@ -248,12 +254,40 @@ suspend fun fetchUserInfoFromSteamAPI(steamId: String): Mono<String> {
             .bodyToMono(String::class.java)
     }
 
-	suspend fun fetchUserInventoryFromSteam(steamId: String): Mono<InventoryItemsList>/* Change output type to the JSON object (data type) */ {
-		val url = "https://steamcommunity.com/inventory/${steamId}/730/2"
+fun parseJsonToInventoryItemsList(json: String): Main {
+		val objectMapper = jacksonObjectMapper() // Initialize your ObjectMapper
+		return objectMapper.readValue(json, Main::class.java)
+	}
+
+	//TO DO: read up on Mono, Flux and decide how to retrieve data
+suspend fun fetchUserInventoryFromSteam(steamId: String): Mono<Main>/* Change output type to the JSON object (data type) */ {
+		//val url = "https://steamcommunity.com/inventory/$steamId/730/2?key=$apiKey"
+		val url = "https://steamcommunity.com/inventory/76561198400981277/730/2?l=english&count=5000"
+
 		return webClient.get()
 		.uri(url)
+		//.header("Authorization", "Bearer $apiKey")
 		.retrieve()
-		.bodyToMono(InventoryItemsList::class.java)
+        .bodyToMono(String::class.java) // Retrieve body as a Flux of Strings
+		.flatMap { chunk -> 
+            // Parse the chunk and convert it to InventoryItemsList
+            val itemsList = parseJsonToInventoryItemsList(chunk)
+            Mono.just(itemsList) // Wrap the result in Mono
+        }
+		.doOnError { error ->
+			println("Error: ${error.message}")
+		}
+	}
+
+suspend fun fetchUserItemPrice(encodedItem: String): Mono<ItemPrice>/* Change output type to the JSON object (data type) */ {
+		println("Encoded item received in fetchUserItemPrice: $encodedItem")
+		val url = "https://steamcommunity.com/market/priceoverview/?currency=1&appid=730&market_hash_name=Sticker+%7C+Ninjas+in+Pyjamas+%7C+Paris+2023" //"https://steamcommunity.com/market/priceoverview/?currency=1&appid=730&market_hash_name=$encodedItem"
+		return webClient.get()
+		.uri(url)
+		.header("Host", "steamcommunity.com")
+		.header("Accept", "application/json, text/plain, */*")
+		.retrieve()
+		.bodyToMono(ItemPrice::class.java)
 	}
 
 }
@@ -286,7 +320,9 @@ class MainController(private val service: SteamService, private val repo: UserRe
 					service.substractCartFromUserBalanceDB(userBalance, body.cartValue, body.loggedInSteamId)
 					//TO DO: remove items from database (logic), itemList should be the list of id's but i don't have those yet, i'll input item names for now
 					service.removePurchasedItemsFromDB(body.itemsInCart)
-					val newBalance = userBalance - body.cartValue
+					val userCartValue = body.userCartValue
+					//TO DO: RELOOK INTO THIS
+					val newBalance = (userBalance + userCartValue) - body.cartValue
 					println("Substraction for user: ${newBalance}")
 					val allTransactions = repo.fetchAllTransactions(body.loggedInSteamId)
 					//update cookie on completion
@@ -371,25 +407,46 @@ class MainController(private val service: SteamService, private val repo: UserRe
 	}
 
 	@PostMapping("/userinventoryonload")
-	suspend fun getUserInventoryContent(@RequestBody steamId: String) {
-		val receivedListOfItems: InventoryItemsList = service.fetchUserInventoryFromSteam(steamId).awaitSingle()
-		//find way to effectively fetch data, i could use pagination for example and display 20 items per page, we'll also use cache, so first time will take a couple of seconds and second will be almost automatic
-		//deserialize json string into the object and .sortDescending() (either here or on front end depending on where i can find prices for items)
-		val decerialized = Json.decodeFromString(receivedListOfItems)
-		//TO DO: find way to get price and then sort the original list (decerialized)
-		val imageLink = "https://community.cloudflare.steamstatic.com/economy/image/"
-		//example indexing for now, preferably i want to sort by price 
-		val numberOfPages = 50
-		var listOfItems = mutableListOf<List<String>>()
-		for (item in numberOfPages) {
-			//to display data, i need the price, the image url and name (i also need the id for db indexing purposes)
-			var itemName = item.name
-			//itemId link: steam://rungame/730/76561202255233023/+csgo_econ_action_preview%20S%owner_steamid%A%assetid%D9432334637321295498
-			var itemId = item.actions.link.split("%")[5].split("D")[1]
-			var itemImageUrl = "https://community.cloudflare.steamstatic.com/economy/image/${item.icon_url}"
-			var createListOf = listOf(itemName, itemId, itemImageUrl)
-			listOfItems.add(createListOf)
+	suspend fun getUserInventoryContent(@RequestBody steamId: String): ResponseEntity<MutableList<ReturnedSkins>> {
+		return try {
+			println("user inventory on load hit: $steamId")
+		
+			val receivedListOfItems: Main = service.fetchUserInventoryFromSteam(steamId).awaitSingle()
+			//find way to effectively fetch data, i could use pagination for example and display 20 items per page, we'll also use cache, so first time will take a couple of seconds and second will be almost automatic
+			//deserialize json string into the object and .sortDescending() (either here or on front end depending on where i can find prices for items)
+			//TO DO: find way to get price and then sort the original list (deserialized)
+			//example indexing for now, preferably i want to sort by price 
+			var listOfItems = mutableListOf<ReturnedSkins>()
+			println("10 test received items: ${receivedListOfItems.descriptions?.take(10)}")
+			for (item in receivedListOfItems.descriptions?.take(50) ?: emptyList()) {
+				//to display data, i need the price, the image url and name (i also need the id for db indexing purposes)
+				var itemName: String? = item.name
+				var encodeItemName = URLEncoder.encode(itemName, "UTF-8")
+				//var price: ItemPrice? = service.fetchUserItemPrice(encodeItemName).awaitSingle() ?: ItemPrice(false, "0", "null")
+				var price: String? = 10.toString()
+				//itemId link: steam://rungame/730/76561202255233023/+csgo_econ_action_preview%20S%owner_steamid%A%assetid%D9432334637321295498
+				var itemId: String? = item.actions?.firstOrNull()?.link?.split("%")?.getOrNull(5)?.split("D")?.getOrNull(1) ?: "Unknown ID"
+				//var itemImageUrl = "https://community.cloudflare.steamstatic.com/economy/image/${item.icon_url}"
+				var itemImageUrl: String? = "https://community.akamai.steamstatic.com/economy/image/${item.icon_url}"
+				//debugging ->
+
+				if (itemName == null) println("Warning: itemName is null")
+				if (itemId == null) println("Warning: itemId is null")
+				if (item.icon_url == null) println("Warning: icon_url is null")
+
+				//var createListOf = listOf(itemName, itemId, itemImageUrl, price) //price?.median_price
+				//println("Price fetched: ${price?.median_price}")
+				listOfItems.add(ReturnedSkins(itemId, price, itemName, itemImageUrl))
+			}
+			//val sortedDescending = listOfItems.sortDescending() { it[3] } //i'll use this later when i can find out how to find prices
+			println("List of items to send to clien: $listOfItems")
+			ResponseEntity.ok(listOfItems)
+		} catch (ex: Exception) {
+			println("Error fetching user inventory: ${ex.message}")
+			ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+				.body(mutableListOf(ReturnedSkins("", "", "", "")))
 		}
+		
 	}
 
 	@GetMapping("/updatebalance")

@@ -10,5 +10,14 @@ import jakarta.persistence.Table;
 @Entity
 @Table(name = "skinsdata")
 data class Skins (
-    val id: String
+    @Id
+    @Column(name = "id")
+    val id: String,
+    @Column(name = "price")
+    val price: String,
+    @Column(name = "hero")
+    val hero: String,
+    @Column(name = "imgurl")
+    val imgurl: String
 )
+

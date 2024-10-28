@@ -5,5 +5,4 @@ data class receivedClientData (
 	val time: Long,
 	val itemsInCart: List<String>, 
     val correspondingPrices: List<String>,
-	val
 )
