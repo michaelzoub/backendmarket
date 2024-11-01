@@ -15,4 +15,6 @@ data class Transactions(
     val transactionId: String,
     @Column(name = "steam_id")
     val steamId: String,
+    @Column(name = "itemsid")
+    val items: List<String>
 )

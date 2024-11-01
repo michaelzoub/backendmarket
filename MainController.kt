@@ -74,6 +74,8 @@ import kotlinx.serialization.json.Json
 @SpringBootApplication
 class DeadlockLogic
 
+val domain: String = "localhost:8080"
+
 @Configuration
 class AppConfig {
 	@Bean
@@ -148,6 +150,14 @@ data class steamIdAndTradeLinkObject (
 	val steamId: String
 )
 
+data class ConfirmTrade (
+	val steamId: String,
+	val transactionId: String,
+	val message: String,
+	val userCartValue: String,
+	val botCartValue: String
+)
+
 @Service
 class SteamService(private val userRepository: UserRepository, private val webClient: WebClient, private val transactionDataCipher: TransactionDataCipher) {
 
@@ -169,9 +179,12 @@ fun createTransactionId(time: Long, items: List<String>, correspondingPrices: Li
 	return encryptedTransaction
 }
 
-fun substractCartFromUserBalanceDB(balance: Double, cartval: Double, steamId: String): Boolean {
-	//perform substraction from database info
-	val newBalance = balance - cartval
+fun deleteTransaction(transactionId: String): Any {
+	val affectedRows = userRepository.deleteTransactionId(transactionId)
+	return affectedRows
+}
+
+fun modifyBalance(newBalance: Double, steamId: String): Boolean {
 	//search for current logged in steam id and replace balance with new balance (MySQL)
 	val update = userRepository.updateBalance(newBalance, steamId)
 	//create uuid and store
@@ -304,32 +317,30 @@ class MainController(private val service: SteamService, private val repo: UserRe
 	@PostMapping("/trade")
 	@Transactional
 	suspend fun trade(@RequestBody body: receivedClientData, responseServlet: HttpServletResponse): ResponseEntity<Any> {
+		//first i need to send a http request to web socket to establish connection
 		println("Trade hit, received info: ${body}")
 		val result = service.findSteamId(body.loggedInSteamId)
 		if (result != -10.1) {
 			println("All good, result: ${result}")
 			var userBalance: Double = result
-			if (body.cartValue > userBalance) {
+			//check if the bot's cart value is bigger or smaller than the user's total balance (cart value + userBalance)
+			if (body.cartValue > (userBalance + body.userCartValue)) {
 				println("cartValue is bigger than $userBalance")
 				ResponseEntity.status(HttpStatus.BAD_REQUEST).body("Error, missing funds.")
 				return ResponseEntity.ok("Error!")
 			} else {
 				val tx = service.createTransactionId(body.time, body.itemsInCart, body.correspondingPrices, body.loggedInSteamId)
+				//store this in db
 				return try {
 					println("User has enough balance ${body.cartValue}")
-					service.substractCartFromUserBalanceDB(userBalance, body.cartValue, body.loggedInSteamId)
-					//TO DO: remove items from database (logic), itemList should be the list of id's but i don't have those yet, i'll input item names for now
-					service.removePurchasedItemsFromDB(body.itemsInCart)
 					val userCartValue = body.userCartValue
 					//TO DO: RELOOK INTO THIS
-					val newBalance = (userBalance + userCartValue) - body.cartValue
-					println("Substraction for user: ${newBalance}")
 					val allTransactions = repo.fetchAllTransactions(body.loggedInSteamId)
 					//update cookie on completion
-					service.updateCookies("", "", newBalance, body.loggedInSteamId, allTransactions, "", responseServlet)
+					service.updateCookies("", "", userCartValue, body.loggedInSteamId, allTransactions, "", responseServlet)
 					//return newBalance and tx
 					val balancePlusTransactionHashMap = hashMapOf(
-						"newBalance" to newBalance,
+						"newBalance" to userCartValue,
 						"transactionId" to tx
 					) 
 					return ResponseEntity.ok(balancePlusTransactionHashMap)
@@ -343,6 +354,33 @@ class MainController(private val service: SteamService, private val repo: UserRe
 		} else {
 			println("error")
 			return ResponseEntity.ok("Error!")
+		}
+	}
+
+	@PostMapping("/confirmtrade")
+	@Transactional
+	suspend fun confirmTrade(body: @RequestBody): Boolean {
+		//check what response is
+		if (body == "Cancelled") {
+			//remove txid
+			service.deleteTransactionId(body.transactionId)
+			return false
+		} else {
+			val userBalance: Double = service.findSteamId(body.steamId)
+			val userCartValue: Double = body.userCartValue.toDouble()
+			val botCartValue: Double = body.botCartValue.toDouble()
+			//TO DO: check if user's cart value is bigger than the bot's, if it is credit with left over money, if it's smaller deduct
+			//TO DO: RELOOK INTO THIS
+
+			val balanceToModify = (userBalance + userCartValue) - botCartValue
+			service.modifyBalance(balanceToModify, body.steamId)
+			val allTransactions = repo.fetchAllTransactions(body.steamId)
+			//update cookie on completion
+			service.updateCookies("", "", balanceToModify, body.steamId, allTransactions, "", responseServlet)
+			//remove 
+			//TO DO: remove items from database (logic), itemList should be the list of id's but i don't have those yet, i'll input item names for now
+			service.removePurchasedItemsFromDB(body.itemsInCart)
+			return true
 		}
 	}
 

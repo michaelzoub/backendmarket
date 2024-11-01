@@ -53,4 +53,9 @@ interface UserRepository: CrudRepository<Users, String> {
     @Transactional
     @Query("DELETE FROM skinsdata i WHERE i.id IN :itemList", nativeQuery = true)
     fun removeItems(@Param("itemList") itemList: List<Any>): Int
+
+    @Modifying
+    @Transactional
+    @Query("DELETE FROM transactiontable WHERE transactionid = :transactionId", nativeQuery = true)
+    fun deleteTransactionId(@Param("transactionId") transactionId: String): Int
 }
